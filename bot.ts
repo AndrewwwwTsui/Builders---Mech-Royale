@@ -50,7 +50,7 @@ run(hello => {
   let stalledSince = 0
   let jetUntil = 0
   return {
-  name: "Dragon Shift 5",
+  name: "Dragon Shift 6",
   act(obs) {
     const {self, zone} = obs
     const [x,y,z] = self.pos
@@ -116,7 +116,24 @@ run(hello => {
     const candidates = Array.from(lootMemory.values(),entry=>entry.item)
     const pickup=nearest(candidates.filter(p=>rank(p.kind)>rank(secondary?.kind ?? "") &&
       reachable(p,enemy ? 24 : 90)))
-    const cube=nearest(candidates.filter(p=>p.kind==="cube" && reachable(p,enemy ? 18 : 65)))
+    const cubeRules = hello.config.cubes
+    const cap = Number(cubeRules.stat_cap ?? 10)
+    const untilOffer = (cubeRules.upgrade_thresholds.find(n => n > self.cubes) ?? Infinity) - self.cubes
+    const searchRadius = enemy ? 18 : 65
+    const available = candidates.filter(p => p.kind==="cube" && reachable(p,searchRadius))
+    let cube: Loot | undefined
+    let bestCost = Infinity
+    for (const item of available) {
+      const trip = distance(item.pos,self.pos)
+      // Clusters are a single short collection trip if their cubes are on the same level.
+      const cluster = available.filter(other => distance(item.pos,other.pos)<=9 &&
+        Math.abs(item.pos[2]-other.pos[2])<3 && visibleIds.has(other.id)).length
+      const earnsOffer = cluster >= untilOffer
+      if (self.cubes>=cap && !earnsOffer) continue
+      const bonus = earnsOffer ? 16 : 0
+      const cost = trip - bonus - 3*Math.min(cluster,3)
+      if (cost<bestCost) { bestCost=cost; cube=item }
+    }
     let goal: number[] = zone.next_center
     if (!retreat) {
       // Finish an active capture while its progress can still pay off.
