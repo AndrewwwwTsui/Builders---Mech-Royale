@@ -36,8 +36,90 @@ function arenaWalls(dir:string) {
     p=>z<p.top && z>p.base && inside(x,y,p.ring) && !p.holes.some(r=>inside(x,y,r)))
 }
 
+// Build a four-neighbor ground graph from the game's mounted map.
+function groundRoutes(dir:string, wall:(x:number,y:number,z:number)=>boolean) {
+  const world=JSON.parse(readFileSync(join(dir,"v2/world.json"),"utf8"))
+  const t=world.terrain, b=world.bounds
+  if (!t || !b) return
+  const heights=readFileSync(join(dir,"v2",t.file))
+  const ground=(x:number,y:number) => {
+    const i=Math.max(0,Math.min(t.nx-1,Math.round((x-t.minX)/t.step)))
+    const j=Math.max(0,Math.min(t.ny-1,Math.round((y-t.minY)/t.step)))
+    return heights.readInt16LE(2*(j*t.nx+i))*t.scale
+  }
+  const step=5
+  const cols=Math.floor((b.maxX-b.minX)/step)+1, rows=Math.floor((b.maxY-b.minY)/step)+1
+  const count=cols*rows, free=new Uint8Array(count), elevations=new Float32Array(count)
+  const point=(id:number):Vec2=>[b.minX+(id%cols)*step,b.minY+Math.floor(id/cols)*step]
+  const cell=(p:number[])=>Math.round((p[1]-b.minY)/step)*cols+Math.round((p[0]-b.minX)/step)
+  for(let id=0;id<count;id++) {
+    const [x,y]=point(id), z=ground(x,y)
+    elevations[id]=z
+    free[id]=Number(x>b.minX+3 && x<b.maxX-3 && y>b.minY+3 && y<b.maxY-3 &&
+      [[0,0],[-3,-3],[3,3],[-3,3],[3,-3]].every(([dx,dy])=>
+        !wall(x+dx,y+dy,z+1.4) && !wall(x+dx,y+dy,z+8)))
+  }
+  function nearCell(p:number[]) {
+    const i=cell(p)
+    if(free[i]) return i
+    let best=-1, cost=12
+    for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) {
+      const id=i+dx+dy*cols
+      if(!free[id]) continue
+      const d=distance(p,point(id))
+      if(d<cost) { best=id; cost=d }
+    }
+    return best
+  }
+  const parent=new Int32Array(count), queue=new Int32Array(count)
+  const directions=[-cols,1,cols,-1]
+  let destination=-1, lastBuild=-Infinity
+  return function waypoint(from:number[],to:number[],now:number):Vec2|undefined {
+    if(Math.abs(from[2]-ground(from[0],from[1]))>5 || distance(from,to)<14) return
+    const segments=Math.ceil(distance(from,to)/3)
+    let direct=true
+    for(let i=1;i<=segments;i++){
+      const x=from[0]+(to[0]-from[0])*i/segments, y=from[1]+(to[1]-from[1])*i/segments
+      if(!free[cell([x,y])]) { direct=false; break }
+    }
+    if(direct) return
+    const start=nearCell(from), end=nearCell(to)
+    if(start<0 || end<0 || start===end) return
+    if(end!==destination) {
+      if(now-lastBuild<0.6) return
+      destination=end; lastBuild=now
+      parent.fill(-1); parent[end]=end; queue[0]=end
+      let tail=1
+      for(let head=0;head<tail;head++){
+        const id=queue[head]
+        for(const delta of directions){
+          const n=id+delta
+          if(!free[n] || parent[n]!==-1 || Math.abs(elevations[n]-elevations[id])>4.5) continue
+          parent[n]=id; queue[tail++]=n
+        }
+      }
+    }
+    if(parent[start]<0) return
+    // Look ahead only across clear cells, so a bend cannot shortcut through a wall.
+    let cursor=start, best=parent[start]
+    for(let j=0;j<14 && cursor!==end;j++){
+      cursor=parent[cursor]
+      const p=point(cursor), n=Math.max(1,Math.ceil(distance(from,p)/2))
+      let clear=true
+      for(let k=1;k<=n;k++){
+        const x=from[0]+(p[0]-from[0])*k/n,y=from[1]+(p[1]-from[1])*k/n
+        if(!free[cell([x,y])]) { clear=false; break }
+      }
+      if(!clear) break
+      best=cursor
+    }
+    return point(best)
+  }
+}
+
 run(hello => {
   const wall=arenaWalls(hello.map.dir)
+  const route=groundRoutes(hello.map.dir,wall)
   let detourSide=1
   let detourUntil=0
   let recovering = false
@@ -50,7 +132,7 @@ run(hello => {
   let stalledSince = 0
   let jetUntil = 0
   return {
-  name: "Dragon Shift 6",
+  name: "Dragon Shift 8",
   act(obs) {
     const {self, zone} = obs
     const [x,y,z] = self.pos
@@ -116,24 +198,7 @@ run(hello => {
     const candidates = Array.from(lootMemory.values(),entry=>entry.item)
     const pickup=nearest(candidates.filter(p=>rank(p.kind)>rank(secondary?.kind ?? "") &&
       reachable(p,enemy ? 24 : 90)))
-    const cubeRules = hello.config.cubes
-    const cap = Number(cubeRules.stat_cap ?? 10)
-    const untilOffer = (cubeRules.upgrade_thresholds.find(n => n > self.cubes) ?? Infinity) - self.cubes
-    const searchRadius = enemy ? 18 : 65
-    const available = candidates.filter(p => p.kind==="cube" && reachable(p,searchRadius))
-    let cube: Loot | undefined
-    let bestCost = Infinity
-    for (const item of available) {
-      const trip = distance(item.pos,self.pos)
-      // Clusters are a single short collection trip if their cubes are on the same level.
-      const cluster = available.filter(other => distance(item.pos,other.pos)<=9 &&
-        Math.abs(item.pos[2]-other.pos[2])<3 && visibleIds.has(other.id)).length
-      const earnsOffer = cluster >= untilOffer
-      if (self.cubes>=cap && !earnsOffer) continue
-      const bonus = earnsOffer ? 16 : 0
-      const cost = trip - bonus - 3*Math.min(cluster,3)
-      if (cost<bestCost) { bestCost=cost; cube=item }
-    }
+    const cube=nearest(candidates.filter(p=>p.kind==="cube" && reachable(p,enemy ? 18 : 65)))
     let goal: number[] = zone.next_center
     if (!retreat) {
       // Finish an active capture while its progress can still pay off.
@@ -153,7 +218,10 @@ run(hello => {
         goal = patrolGoal
       }
     }
-    let dx = goal[0]-x, dy = goal[1]-y
+    const navigating=goal!==enemy?.pos && goal!==drone?.pos
+    const waypoint=navigating ? route?.(self.pos,goal,obs.t) : undefined
+    const steeringGoal=waypoint ?? goal
+    let dx = steeringGoal[0]-x, dy = steeringGoal[1]-y
     const capturing = drop && goal===drop.pos && Math.hypot(dx,dy)<drop.radius*0.6
     if (capturing) { dx=0; dy=0 }
     if (enemy && goal === enemy.pos) {
