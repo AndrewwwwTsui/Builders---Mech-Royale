@@ -4,8 +4,11 @@ const priorities = ["armor", "gun_rate", "gun_damage", "sensors"]
 const distance = (a: number[], b: number[]) => Math.hypot(a[0]-b[0], a[1]-b[1])
 const angleError = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a-b), Math.cos(a-b)))
 
-run(hello => ({
-  name: "Dragon Shift",
+run(hello => {
+  let stalledSince = 0
+  let jetUntil = 0
+  return {
+  name: "Dragon Shift 2",
   act(obs) {
     const {self, zone} = obs
     const [x,y,z] = self.pos
@@ -18,14 +21,22 @@ run(hello => ({
     const crate = nearest(obs.crates)
     const cube = nearest(obs.cubes)
     const target = enemy ?? crate
-    const safe = distance(self.pos, zone.next_center) < Math.max(4,zone.next_radius-16)
+    // Keep enough travel time in reserve to reach the next circle.
+    const excess = Math.max(0, distance(self.pos,zone.next_center)-Math.max(0,zone.next_radius-8))
+    const retreat = !self.in_zone || (excess>0 && zone.shrink_end-obs.t < excess/7+12)
+    const drop = nearest(obs.drops.filter(d=>d.lands_in<8 && distance(d.pos,self.pos)<105))
+    const reachable = (item: {pos:number[]}, radius:number) =>
+      distance(item.pos,self.pos)<radius && Math.abs(item.pos[2]-z)<8
     let goal: number[] = zone.next_center
-    if (safe && self.in_zone) {
-      if (cube && distance(cube.pos,self.pos)<60) goal = cube.pos
-      else if (pickup && secondary?.kind !== "lightning" && distance(pickup.pos,self.pos)<85) goal = pickup.pos
+    if (!retreat) {
+      if (drop && (self.hp<self.max_hp*0.82 || !enemy)) goal = drop.pos
+      else if (cube && reachable(cube,enemy ? 18 : 65)) goal = cube.pos
+      else if (pickup && secondary?.kind !== "lightning" && reachable(pickup,enemy ? 24 : 90)) goal = pickup.pos
       else if (target) goal = target.pos
     }
     let dx = goal[0]-x, dy = goal[1]-y
+    const capturing = drop && goal===drop.pos && Math.hypot(dx,dy)<drop.radius*0.6
+    if (capturing) { dx=0; dy=0 }
     if (enemy && goal === enemy.pos) {
       const range = Math.hypot(dx,dy)
       const advance = Math.max(-1,Math.min(1,(range-(secondary?.kind === "lightning" ? 30 : 65))/20))
@@ -33,9 +44,17 @@ run(hello => ({
       ;[dx,dy] = [advance*dx-side*dy,advance*dy+side*dx]
     }
     const length = Math.max(1,Math.hypot(dx,dy))
+    // A short jump alone cannot clear buildings. Continue thrusting after takeoff.
+    const forwardSpeed=(dx*self.vel[0]+dy*self.vel[1])/length
+    if (length<4 || forwardSpeed>3 || !self.grounded) stalledSince=obs.t
+    if (self.grounded && obs.t-stalledSince>0.65 && self.energy>35) {
+      jetUntil=obs.t+Math.min(3.2,self.energy/22)
+      stalledSince=obs.t
+    }
+    const climbing = obs.t<jetUntil
     const action: Omit<Action,"tick"> = {
-      move:[dx/length,dy/length], boost: !self.in_zone || (!safe && self.energy>45),
-      jump: Math.hypot(self.vel[0],self.vel[1])<2 && length>5 && obs.tick%10===0
+      move:[dx/length,dy/length], boost: climbing || (retreat && self.energy>35),
+      jump: climbing && self.grounded
     }
     if (target) {
       const range = distance(target.pos,self.pos)
@@ -64,4 +83,4 @@ run(hello => ({
     }
     return action
   }
-}))
+}})
