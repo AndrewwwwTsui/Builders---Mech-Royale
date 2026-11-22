@@ -44,11 +44,13 @@ run(hello => {
   let patrolStep = 0
   let patrolGoal: Vec2 | undefined
   let patrolExpires = 0
+  type Loot = {id:number, pos:[number,number,number], kind:string}
+  const lootMemory = new Map<number,{item:Loot, seen:number}>()
   let focused=-1
   let stalledSince = 0
   let jetUntil = 0
   return {
-  name: "Dragon Shift 4",
+  name: "Dragon Shift 5",
   act(obs) {
     const {self, zone} = obs
     const [x,y,z] = self.pos
@@ -73,9 +75,17 @@ run(hello => {
     const drone=nearest(actors.filter(a=>a.kind==="npc" && distance(a.pos,self.pos)<115))
     const secondary=self.weapons[1]
     const rank=(kind:string)=>kind==="laser"?3:kind==="lightning"?2:0
-    const pickup=nearest(obs.pickups.filter(p=>rank(p.kind)>rank(secondary?.kind ?? "") && Math.abs(p.pos[2]-z)<6))
+    const visibleLoot: Loot[] = [
+      ...obs.pickups,
+      ...obs.cubes.map(c => ({id:c.id,pos:c.pos,kind:"cube"}))
+    ]
+    const visibleIds = new Set(visibleLoot.map(item=>item.id))
+    for (const item of visibleLoot) lootMemory.set(item.id,{item,seen:obs.t})
+    for (const [id,entry] of lootMemory) {
+      const arrived = distance(entry.item.pos,self.pos)<5 && Math.abs(entry.item.pos[2]-z)<4
+      if (obs.t-entry.seen>7 || (arrived && !visibleIds.has(id))) lootMemory.delete(id)
+    }
     const crate=nearest(obs.crates.filter(c=>clearTo(c.pos,1.2)))
-    const cube=nearest(obs.cubes.filter(c=>Math.abs(c.pos[2]-z)<6))
     // Dealing damage resets regeneration, including optional encounters.
     const healthFraction = self.hp / self.max_hp
     if (healthFraction < 0.55) recovering = true
@@ -103,13 +113,17 @@ run(hello => {
     }))
     const reachable = (item: {pos:number[]}, radius:number) =>
       distance(item.pos,self.pos)<radius && Math.abs(item.pos[2]-z)<8 && safeOnArrival(item.pos)
+    const candidates = Array.from(lootMemory.values(),entry=>entry.item)
+    const pickup=nearest(candidates.filter(p=>rank(p.kind)>rank(secondary?.kind ?? "") &&
+      reachable(p,enemy ? 24 : 90)))
+    const cube=nearest(candidates.filter(p=>p.kind==="cube" && reachable(p,enemy ? 18 : 65)))
     let goal: number[] = zone.next_center
     if (!retreat) {
       // Finish an active capture while its progress can still pay off.
       const canCapture = drop && (drop.holder===self.id || !enemy || healthFraction<0.82)
       if (canCapture) goal = drop.pos
-      else if (cube && reachable(cube,enemy ? 18 : 65)) goal = cube.pos
-      else if (pickup && reachable(pickup,enemy ? 24 : 90)) goal = pickup.pos
+      else if (cube) goal = cube.pos
+      else if (pickup) goal = pickup.pos
       else if (target && safeOnArrival(target.pos)) goal = target.pos
       else if (!target && distance(self.pos,zone.next_center)<Math.max(18,zone.next_radius*0.55) && zone.next_radius>35) {
         // Explore new pickup locations when the center has already been searched.
@@ -183,7 +197,7 @@ run(hello => {
       action.reload = (self.weapons[0]?.ammo ?? 12)<9
     }
     function nearestSound() { return obs.sounds.find(s=>s.dist==="near") ?? obs.sounds[0] }
-    if (pickup && secondary?.kind!==pickup.kind && distance(pickup.pos,self.pos)<hello.config.loot.pickup_radius && Math.abs(pickup.pos[2]-z)<4) {
+    if (pickup && visibleIds.has(pickup.id) && secondary?.kind!==pickup.kind && distance(pickup.pos,self.pos)<hello.config.loot.pickup_radius && Math.abs(pickup.pos[2]-z)<4) {
       action.take = pickup.id
       if (secondary) action.drop=1
     }
